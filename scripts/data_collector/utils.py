@@ -11,7 +11,7 @@ import random
 import requests
 import functools
 from pathlib import Path
-from typing import Iterable, Tuple, List
+from typing import Iterable, Tuple, List, Union
 
 import numpy as np
 import pandas as pd
@@ -37,6 +37,7 @@ CALENDAR_BENCH_URL_MAP = {
     "US_ALL": "^GSPC",
     "IN_ALL": "^NSEI",
     "BR_ALL": "^BVSP",
+    "TWII": CALENDAR_URL_BASE.format(market=100, bench_code="TWII"),
 }
 
 _BENCH_CALENDAR_LIST = None
@@ -45,6 +46,7 @@ _HS_SYMBOLS = None
 _US_SYMBOLS = None
 _IN_SYMBOLS = None
 _BR_SYMBOLS = None
+_TW_SYMBOLS = None
 _EN_FUND_SYMBOLS = None
 _CALENDAR_MAP = {}
 
@@ -58,7 +60,7 @@ def get_calendar_list(bench_code="CSI300") -> List[pd.Timestamp]:
     Parameters
     ----------
     bench_code: str
-        value from ["CSI300", "CSI500", "ALL", "US_ALL"]
+        value from ["CSI300", "CSI500", "ALL", "US_ALL", "IN_ALL", "BR_ALL", "TWII"]
 
     Returns
     -------
@@ -78,6 +80,9 @@ def get_calendar_list(bench_code="CSI300") -> List[pd.Timestamp]:
             print(Ticker(CALENDAR_BENCH_URL_MAP[bench_code]).history(interval="1d", period="max"))
             df = Ticker(CALENDAR_BENCH_URL_MAP[bench_code]).history(interval="1d", period="max")
             calendar = df.index.get_level_values(level="date").map(pd.Timestamp).unique().tolist()
+        elif bench_code.startswith("TW_") or bench_code in ["TWII"]:
+            # Taiwan market uses eastmoney API like China market
+            calendar = _get_calendar(CALENDAR_BENCH_URL_MAP[bench_code])
         else:
             if bench_code.upper() == "ALL":
 
@@ -115,7 +120,7 @@ def return_date_list(date_field_name: str, file_path: Path):
 
 
 def get_calendar_list_by_ratio(
-    source_dir: [str, Path],
+    source_dir: Union[str, Path],
     date_field_name: str = "date",
     threshold: float = 0.5,
     minimum_count: int = 10,
@@ -290,7 +295,7 @@ def get_hs_stock_symbols() -> list:
     return _HS_SYMBOLS
 
 
-def get_us_stock_symbols(qlib_data_path: [str, Path] = None) -> list:
+def get_us_stock_symbols(qlib_data_path: Union[str, Path] = None) -> list:
     """get US stock symbols
 
     Returns
@@ -377,7 +382,7 @@ def get_us_stock_symbols(qlib_data_path: [str, Path] = None) -> list:
     return _US_SYMBOLS
 
 
-def get_in_stock_symbols(qlib_data_path: [str, Path] = None) -> list:
+def get_in_stock_symbols(qlib_data_path: Union[str, Path] = None) -> list:
     """get IN stock symbols
 
     Returns
@@ -418,7 +423,7 @@ def get_in_stock_symbols(qlib_data_path: [str, Path] = None) -> list:
     return _IN_SYMBOLS
 
 
-def get_br_stock_symbols(qlib_data_path: [str, Path] = None) -> list:
+def get_br_stock_symbols(qlib_data_path: Union[str, Path] = None) -> list:
     """get Brazil(B3) stock symbols
 
     Returns
@@ -469,7 +474,111 @@ def get_br_stock_symbols(qlib_data_path: [str, Path] = None) -> list:
     return _BR_SYMBOLS
 
 
-def get_en_fund_symbols(qlib_data_path: [str, Path] = None) -> list:
+def get_tw_stock_symbols(qlib_data_path: Union[str, Path] = None) -> list:
+    """get Taiwan stock symbols
+
+    Returns
+    -------
+        Taiwan stock symbols
+    """
+    global _TW_SYMBOLS  # pylint: disable=W0603
+
+    @deco_retry
+    def _get_twse_symbols():
+        """Get TWSE (Taiwan Stock Exchange) symbols"""
+        _symbols = []
+        url = "https://www.twse.com.tw/exchangeReport/STOCK_DAY_AVG_ALL?response=csv&date="
+        
+        # Get current date
+        from datetime import datetime
+        today = datetime.now()
+        date_str = today.strftime("%Y%m%d")
+        
+        try:
+            agent = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            response = requests.get(url + date_str, headers=agent, timeout=30)
+            response.raise_for_status()
+            
+            # Parse CSV response
+            lines = response.text.strip().split('\n')
+            for line in lines[1:]:  # Skip header
+                if line.strip() and not line.startswith('='):
+                    parts = line.split(',')
+                    if len(parts) >= 2:
+                        symbol = parts[0].strip('"').strip()
+                        if symbol and symbol.isdigit():
+                            _symbols.append(symbol + '.TW')
+        except Exception as e:
+            logger.warning(f"Failed to get TWSE symbols: {e}")
+            # Fallback to major Taiwan stocks
+            _symbols = [
+                "2330.TW", "2454.TW", "2882.TW", "2881.TW", "3008.TW",
+                "2886.TW", "2891.TW", "2317.TW", "2002.TW", "1303.TW",
+                "2412.TW", "1301.TW", "2308.TW", "2303.TW", "3711.TW",
+                "2357.TW", "2382.TW", "2395.TW", "2409.TW", "6505.TW"
+            ]
+        
+        return _symbols
+
+    @deco_retry 
+    def _get_tpex_symbols():
+        """Get TPEx (Taipei Exchange) OTC symbols"""
+        _symbols = []
+        url = "https://www.tpex.org.tw/web/stock/aftertrading/otc_quotes_no1430/stk_wn1430_result.php"
+        
+        from datetime import datetime
+        today = datetime.now()
+        date_str = today.strftime("%Y/%m/%d")
+        
+        try:
+            agent = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            params = {"l": "zh-tw", "d": date_str, "se": "EW"}
+            response = requests.get(url, params=params, headers=agent, timeout=30)
+            response.raise_for_status()
+            
+            data = response.json()
+            if 'aaData' in data:
+                for item in data['aaData']:
+                    if len(item) >= 1:
+                        symbol = str(item[0]).strip()
+                        if symbol and symbol.isdigit():
+                            _symbols.append(symbol + '.TWO')
+        except Exception as e:
+            logger.warning(f"Failed to get TPEx symbols: {e}")
+            # Fallback to some OTC stocks
+            _symbols = [
+                "5484.TWO", "6488.TWO", "3443.TWO", "4968.TWO", "6271.TWO"
+            ]
+        
+        return _symbols
+
+    if _TW_SYMBOLS is None:
+        # Get TWSE symbols
+        twse_symbols = _get_twse_symbols()
+        # Get TPEx symbols  
+        tpex_symbols = _get_tpex_symbols()
+        
+        _all_symbols = twse_symbols + tpex_symbols
+        
+        if qlib_data_path is not None:
+            for _index in ["twii"]:
+                try:
+                    ins_df = pd.read_csv(
+                        Path(qlib_data_path).joinpath(f"instruments/{_index}.txt"),
+                        sep="\t", 
+                        names=["symbol", "start_date", "end_date"],
+                    )
+                    _all_symbols += ins_df["symbol"].unique().tolist()
+                except FileNotFoundError:
+                    logger.warning(f"Taiwan index file {_index}.txt not found")
+                    continue
+
+        _TW_SYMBOLS = sorted(set(_all_symbols))
+
+    return _TW_SYMBOLS
+
+
+def get_en_fund_symbols(qlib_data_path: Union[str, Path] = None) -> list:
     """get en fund symbols
 
     Returns

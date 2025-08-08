@@ -24,7 +24,7 @@ import qlib
 from qlib.data import D
 from qlib.tests.data import GetData
 from qlib.utils import code_to_fname, fname_to_code, exists_qlib_data
-from qlib.constant import REG_CN as REGION_CN
+from qlib.constant import REG_CN as REGION_CN, REG_TW
 
 CUR_DIR = Path(__file__).resolve().parent
 sys.path.append(str(CUR_DIR.parent.parent))
@@ -38,6 +38,7 @@ from data_collector.utils import (
     get_us_stock_symbols,
     get_in_stock_symbols,
     get_br_stock_symbols,
+    get_tw_stock_symbols,
     generate_minutes_calendar_from_daily,
     calc_adjusted_price,
 )
@@ -362,6 +363,40 @@ class YahooCollectorBR1d(YahooCollectorBR):
 
 class YahooCollectorBR1min(YahooCollectorBR):
     retry = 2
+
+
+class YahooCollectorTW(YahooCollector, ABC):
+    def retry(cls):  # pylint: disable=E0213
+        """
+        Taiwan stock market collector with retry configuration
+        """
+        raise NotImplementedError
+
+    def get_instrument_list(self):
+        logger.info("get TW stock symbols......")
+        symbols = get_tw_stock_symbols() + [
+            "^TWII",  # Taiwan Stock Exchange Weighted Index (TAIEX)
+        ]
+        logger.info(f"get {len(symbols)} symbols.")
+        return symbols
+
+    def download_index_data(self):
+        pass
+
+    def normalize_symbol(self, symbol):
+        return code_to_fname(symbol).upper()
+
+    @property
+    def _timezone(self):
+        return "Asia/Taipei"
+
+
+class YahooCollectorTW1d(YahooCollectorTW):
+    retry = 5
+
+
+class YahooCollectorTW1min(YahooCollectorTW):
+    retry = 5
 
 
 class YahooNormalize(BaseNormalize):
@@ -724,6 +759,29 @@ class YahooNormalizeBR1min(YahooNormalizeBR, YahooNormalize1min):
         return fname_to_code(symbol)
 
 
+class YahooNormalizeTW:
+    def _get_calendar_list(self) -> Iterable[pd.Timestamp]:
+        return get_calendar_list("TWII")
+
+
+class YahooNormalizeTW1d(YahooNormalizeTW, YahooNormalize1d):
+    pass
+
+
+class YahooNormalizeTW1min(YahooNormalizeTW, YahooNormalize1min):
+    CALC_PAUSED_NUM = False
+
+    def _get_calendar_list(self) -> Iterable[pd.Timestamp]:
+        # TODO: support 1min  
+        raise ValueError("Does not support 1min")
+
+    def _get_1d_calendar_list(self):
+        return get_calendar_list("TWII")
+
+    def symbol_to_yahoo(self, symbol):
+        return fname_to_code(symbol)
+
+
 class Run(BaseRun):
     def __init__(self, source_dir=None, normalize_dir=None, max_workers=1, interval="1d", region=REGION_CN):
         """
@@ -739,7 +797,7 @@ class Run(BaseRun):
         interval: str
             freq, value from [1min, 1d], default 1d
         region: str
-            region, value from ["CN", "US", "BR"], default "CN"
+            region, value from ["CN", "US", "BR", "IN", "TW"], default "CN"
         """
         super().__init__(source_dir, normalize_dir, max_workers, interval)
         self.region = region
@@ -1006,10 +1064,17 @@ class Run(BaseRun):
 
         # parse index
         _region = self.region.lower()
-        if _region not in ["cn", "us"]:
+        if _region not in ["cn", "us", "tw"]:
             logger.warning(f"Unsupported region: region={_region}, component downloads will be ignored")
             return
-        index_list = ["CSI100", "CSI300"] if _region == "cn" else ["SP500", "NASDAQ100", "DJIA", "SP400"]
+        
+        if _region == "cn":
+            index_list = ["CSI100", "CSI300"]
+        elif _region == "us":
+            index_list = ["SP500", "NASDAQ100", "DJIA", "SP400"]
+        elif _region == "tw":
+            index_list = ["TWII"]
+        
         get_instruments = getattr(
             importlib.import_module(f"data_collector.{_region}_index.collector"), "get_instruments"
         )

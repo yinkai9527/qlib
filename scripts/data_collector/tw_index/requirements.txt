@@ -1,0 +1,10 @@
+fire
+requests
+pandas
+lxml
+loguru
+tqdm
+openpyxl
+twstock
+yahooquery
+baostock
