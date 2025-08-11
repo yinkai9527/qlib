@@ -49,24 +49,58 @@ class DataHealthChecker:
             self.load_qlib_data()
 
     def load_qlib_data(self):
-        instruments = D.instruments(market="all")
-        instrument_list = D.list_instruments(instruments=instruments, as_list=True, freq=self.freq)
+        # 先嘗試使用 "all" 市場，如果失敗則嘗試台灣指數
+        try:
+            instruments = D.instruments(market="all")
+            instrument_list = D.list_instruments(instruments=instruments, as_list=True, freq=self.freq)
+        except ValueError as e:
+            if "all.txt" in str(e):
+                logger.info("all.txt not found, trying Taiwan market indices...")
+                # 嘗試台灣指數
+                try:
+                    instruments = D.instruments(market="twii")  # 台灣加權指數
+                    instrument_list = D.list_instruments(instruments=instruments, as_list=True, freq=self.freq)
+                    logger.info(f"✅ Using TWII (Taiwan Weighted Index) with {len(instrument_list)} instruments")
+                except ValueError:
+                    # 如果 twii 也失敗，嘗試其他台灣指數
+                    try:
+                        instruments = D.instruments(market="tw50")  # 台灣50指數
+                        instrument_list = D.list_instruments(instruments=instruments, as_list=True, freq=self.freq)
+                        logger.info(f"✅ Using TW50 (Taiwan 50 Index) with {len(instrument_list)} instruments")
+                    except ValueError:
+                        try:
+                            instruments = D.instruments(market="twmidcap")  # 台灣中型100指數
+                            instrument_list = D.list_instruments(instruments=instruments, as_list=True, freq=self.freq)
+                            logger.info(f"✅ Using TWMIDCAP (Taiwan Mid-Cap 100) with {len(instrument_list)} instruments")
+                        except ValueError:
+                            logger.error("❌ No valid market index found. Please ensure your data contains valid instrument files.")
+                            raise e
+            else:
+                raise e
+        
         required_fields = ["$open", "$close", "$low", "$high", "$volume", "$factor"]
-        for instrument in instrument_list:
-            df = D.features([instrument], required_fields, freq=self.freq)
-            df.rename(
-                columns={
-                    "$open": "open",
-                    "$close": "close",
-                    "$low": "low",
-                    "$high": "high",
-                    "$volume": "volume",
-                    "$factor": "factor",
-                },
-                inplace=True,
-            )
-            self.data[instrument] = df
-        print(df)
+        logger.info(f"📊 Loading data for {len(instrument_list)} instruments...")
+        
+        for instrument in tqdm(instrument_list, desc="Loading instrument data"):
+            try:
+                df = D.features([instrument], required_fields, freq=self.freq)
+                df.rename(
+                    columns={
+                        "$open": "open",
+                        "$close": "close",
+                        "$low": "low",
+                        "$high": "high",
+                        "$volume": "volume",
+                        "$factor": "factor",
+                    },
+                    inplace=True,
+                )
+                self.data[instrument] = df
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to load data for {instrument}: {e}")
+                continue
+        
+        logger.info(f"✅ Successfully loaded data for {len(self.data)} instruments")
 
     def check_missing_data(self) -> Optional[pd.DataFrame]:
         """Check if any data is missing in the DataFrame."""
@@ -151,15 +185,24 @@ class DataHealthChecker:
             "missing_factor_col": [],
             "missing_factor_data": [],
         }
+        
+        # 定義指數代碼，這些通常不需要 factor 調整
+        index_codes = ["000300", "000903", "000905", "^TWII", "TWII"]  # 中國指數 + 台灣指數
+        
         for filename, df in self.data.items():
-            if "000300" in filename or "000903" in filename or "000905" in filename:
+            # 跳過指數，因為指數通常不需要復權因子
+            is_index = any(index_code in str(filename) for index_code in index_codes)
+            if is_index:
                 continue
+                
             if "factor" not in df.columns:
                 result_dict["instruments"].append(filename)
                 result_dict["missing_factor_col"].append(True)
-            if df["factor"].isnull().all():
+                result_dict["missing_factor_data"].append(False)
+            elif df["factor"].isnull().all():
                 if filename in result_dict["instruments"]:
-                    result_dict["missing_factor_data"].append(True)
+                    idx = result_dict["instruments"].index(filename)
+                    result_dict["missing_factor_data"][idx] = True
                 else:
                     result_dict["instruments"].append(filename)
                     result_dict["missing_factor_col"].append(False)
@@ -177,12 +220,15 @@ class DataHealthChecker:
         check_large_step_changes_result = self.check_large_step_changes()
         check_required_columns_result = self.check_required_columns()
         check_missing_factor_result = self.check_missing_factor()
-        if (
-            check_large_step_changes_result is not None
+        
+        has_issues = (
+            check_missing_data_result is not None
             or check_large_step_changes_result is not None
             or check_required_columns_result is not None
             or check_missing_factor_result is not None
-        ):
+        )
+        
+        if has_issues:
             print(f"\nSummary of data health check ({len(self.data)} files checked):")
             print("-------------------------------------------------")
             if isinstance(check_missing_data_result, pd.DataFrame):
@@ -197,6 +243,10 @@ class DataHealthChecker:
             if isinstance(check_missing_factor_result, pd.DataFrame):
                 logger.warning(f"The factor column does not exist or is empty")
                 print(check_missing_factor_result)
+        else:
+            print(f"\n✅ Data health check passed! ({len(self.data)} files checked)")
+            print("-------------------------------------------------")
+            logger.info("All checks passed successfully.")
 
 
 if __name__ == "__main__":
